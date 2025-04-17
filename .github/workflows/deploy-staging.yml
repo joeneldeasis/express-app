@@ -1,0 +1,71 @@
+name: Build and Push to Amazon ECR
+
+on:
+  push:
+    branches:
+      - staging
+
+env:
+  ECR_REPOSITORY: testing/nrg-api-server
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tar: ${{ steps.save.outputs.image_tar }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -t nrg-api-server:${{ env.IMAGE_TAG }} .
+          docker save nrg-api-server:${{ env.IMAGE_TAG }} -o image.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tar
+          path: image.tar
+
+  push:
+    name: Push Image to ECR
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+          path: .
+
+      - name: Load Docker image
+        run: |
+          docker load -i image.tar
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push image to ECR
+        run: |
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+
+          docker tag nrg-api-server:${{ env.IMAGE_TAG }} $IMAGE_URI
+          docker push $IMAGE_URI
+
+      - name: Output pushed image URI
+        run: echo "Pushed image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
