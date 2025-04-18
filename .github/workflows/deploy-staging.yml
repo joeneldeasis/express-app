@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
+      image_tag: ${{ env.IMAGE_TAG }}
       ecr_registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
@@ -72,18 +73,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install SSH Key
+      - name: Configure bastion key
         run: |
           echo "${{ secrets.BASTION_KEY }}" > bastion.pem
           chmod 600 bastion.pem
 
-      - name: SSH into Bastion and Deploy
+      - name: Configure API server key (for bastion to inner SSH)
+        run: |
+          echo "${{ secrets.API_SERVER_KEY }}" > api.pem
+          chmod 600 api.pem
+
+      - name: Copy API server key to bastion
+        run: |
+          scp -i bastion.pem -o StrictHostKeyChecking=no api.pem ${{ secrets.BASTION_USER }}@175.41.179.252:/tmp/api.pem
+
+      - name: SSH to bastion and deploy to API server
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
           IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
 
-          ssh -i bastion.pem -o StrictHostKeyChecking=no ${{ secrets.BASTION_USER }}@175.41.179.252 << EOF
-            ssh -o StrictHostKeyChecking=no 10.0.131.122 << INNER
+          ssh -i bastion.pem -o StrictHostKeyChecking=no ${{ secrets.BASTION_USER }}@175.41.179.252 << 'EOF'
+            ssh -i /tmp/api.pem -o StrictHostKeyChecking=no ec2-user@10.0.131.122 << INNER
               echo "Logging into ECR..."
               aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
 
@@ -92,5 +102,5 @@ jobs:
               docker stop nrg-api || true
               docker rm nrg-api || true
               docker run -d --name nrg-api -p 3000:3000 $IMAGE_URI
-            INNER
+          INNER
           EOF
