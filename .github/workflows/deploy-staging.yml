@@ -1,9 +1,10 @@
-name: Build and Push to Amazon ECR
+name: CI/CD: Build, Push, and Deploy
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - master  # or your target branch
+      - main
 
 env:
   ECR_REPOSITORY: testing/nrg-api-server
@@ -14,9 +15,6 @@ jobs:
     name: Build Docker Image
     runs-on: ubuntu-latest
 
-    outputs:
-      image_tar: ${{ steps.save.outputs.image_tar }}
-
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
@@ -26,23 +24,25 @@ jobs:
           docker build -t nrg-api-server:${{ env.IMAGE_TAG }} .
           docker save nrg-api-server:${{ env.IMAGE_TAG }} -o image.tar
 
-      - name: Upload Docker image artifact
+      - name: Upload Docker image
         uses: actions/upload-artifact@v4
         with:
           name: image-tar
           path: image.tar
 
   push:
-    name: Push Image to ECR
+    name: Push Docker Image to Amazon ECR
     needs: build
     runs-on: ubuntu-latest
 
+    outputs:
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+
     steps:
-      - name: Download Docker image artifact
+      - name: Download Docker image
         uses: actions/download-artifact@v4
         with:
           name: image-tar
-          path: .
 
       - name: Load Docker image
         run: |
@@ -59,14 +59,38 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Tag and push image to ECR
+      - name: Tag and push to ECR
         run: |
           ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
           IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
-
           docker tag nrg-api-server:${{ env.IMAGE_TAG }} $IMAGE_URI
           docker push $IMAGE_URI
 
-      - name: Output pushed image URI
+  deploy:
+    name: Deploy to API Server via Bastion
+    needs: push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install SSH Key
         run: |
-          echo "Pushed image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          echo "${{ secrets.BASTION_KEY }}" > bastion.pem
+          chmod 600 bastion.pem
+
+      - name: SSH into Bastion and Deploy
+        run: |
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+
+          ssh -i bastion.pem -o StrictHostKeyChecking=no ${{ secrets.BASTION_USER }}@175.41.179.252 << EOF
+            ssh -o StrictHostKeyChecking=no 10.0.131.122 << INNER
+              echo "Logging into ECR..."
+              aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+              echo "Pulling and running Docker image..."
+              docker pull $IMAGE_URI
+              docker stop nrg-api || true
+              docker rm nrg-api || true
+              docker run -d --name nrg-api -p 3000:3000 $IMAGE_URI
+            INNER
+          EOF
